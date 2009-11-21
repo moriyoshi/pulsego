@@ -8,9 +8,20 @@ package pulse
 #include <pulse/stream.h>
 #include <pulse/thread-mainloop.h>
 
-struct pa_threaded_mainloop {};
-struct pa_context {};
-struct pa_stream {};
+void cfree(void*);
+
+typedef struct {
+    pa_threaded_mainloop *pa;
+    int done;
+    int status;
+} state_cb_param_t;
+
+static void context_on_completion(pa_context *ctx, int status, state_cb_param_t *param)
+{
+    param->status = status;
+    param->done = 1;
+    pa_threaded_mainloop_signal(param->pa, 0);
+}
 
 static void context_on_state_change(pa_context *ctx, pa_threaded_mainloop *pa)
 {
@@ -22,54 +33,123 @@ static void stream_on_state_change(pa_stream *st, pa_threaded_mainloop *pa)
     pa_threaded_mainloop_signal(pa, 0);
 }
 
-void context_poll_unless(pa_threaded_mainloop *pa, pa_context *ctx, pa_context_state_t state)
+int context_poll_unless(pa_threaded_mainloop *pa, pa_context *ctx, pa_context_state_t state)
 {
+    pa_context_state_t s;
+    pa_threaded_mainloop_lock(pa);
     for (;;) {
-        pa_context_state_t s;
-        pa_threaded_mainloop_lock(pa);
         s = pa_context_get_state(ctx);
-        pa_threaded_mainloop_unlock(pa);
-        if (s == state)
+        if (s == state || s == PA_CONTEXT_FAILED || s == PA_CONTEXT_TERMINATED)
             break;
         pa_threaded_mainloop_wait(pa);
     }
+    pa_threaded_mainloop_unlock(pa);
+    return s;
 }
 
-void stream_poll_unless(pa_threaded_mainloop *pa, pa_stream *st, pa_stream_state_t state)
+int context_poll_until_done(state_cb_param_t *param, pa_context *ctx)
 {
     for (;;) {
-        pa_stream_state_t s;
-        pa_threaded_mainloop_lock(pa);
+        if (param->done)
+            break;
+        pa_threaded_mainloop_wait(param->pa);
+    }
+    return param->status;
+}
+
+int stream_poll_unless(pa_threaded_mainloop *pa, pa_stream *st, pa_stream_state_t state)
+{
+    pa_stream_state_t s;
+    pa_threaded_mainloop_lock(pa);
+    for (;;) {
         s = pa_stream_get_state(st);
-        pa_threaded_mainloop_unlock(pa);
-        if (s == state)
+        if (s == state || s == PA_STREAM_FAILED || s == PA_STREAM_TERMINATED)
             break;
         pa_threaded_mainloop_wait(pa);
     }
+    pa_threaded_mainloop_unlock(pa);
+    return s;
 }
 
-pa_context *context_new(pa_threaded_mainloop *pa)
+int context_set_default_sink(pa_threaded_mainloop *pa, pa_context *ctx, const char *name)
+{
+    pa_operation *op;
+    state_cb_param_t param = { pa, 0, 0 };
+
+    pa_threaded_mainloop_lock(pa);
+    op = pa_context_set_default_sink(ctx, name, (pa_context_success_cb_t)context_on_completion, pa);
+    pa_threaded_mainloop_unlock(pa);
+    context_poll_until_done(&param, ctx);
+    pa_operation_unref(op);
+    return param.status;
+}
+
+int context_set_default_source(pa_threaded_mainloop *pa, pa_context *ctx, const char *name)
+{
+    pa_operation *op;
+    state_cb_param_t param = { pa, 0, 0 };
+
+    pa_threaded_mainloop_lock(pa);
+    op = pa_context_set_default_source(ctx, name, (pa_context_success_cb_t)context_on_completion, pa);
+    pa_threaded_mainloop_unlock(pa);
+    context_poll_until_done(&param, ctx);
+    pa_operation_unref(op);
+    return param.status;
+}
+
+int context_exit_daemon(pa_threaded_mainloop *pa, pa_context *ctx)
+{
+    pa_operation *op;
+    state_cb_param_t param = { pa, 0, 0 };
+
+    pa_threaded_mainloop_lock(pa);
+    op = pa_context_exit_daemon(ctx, (pa_context_success_cb_t)context_on_completion, pa);
+    pa_threaded_mainloop_unlock(pa);
+    context_poll_until_done(&param, ctx);
+    if (op)
+        pa_operation_unref(op);
+    return param.status;
+}
+
+int context_drain(pa_threaded_mainloop *pa, pa_context *ctx)
+{
+    pa_operation *op;
+    state_cb_param_t param = { pa, 0, 0 };
+
+    pa_threaded_mainloop_lock(pa);
+    op = pa_context_drain(ctx, (pa_context_notify_cb_t)context_on_state_change, pa);
+    pa_threaded_mainloop_unlock(pa);
+    pa_threaded_mainloop_wait(pa);
+    if (op)
+        pa_operation_unref(op);
+    return param.status;
+}
+
+pa_context *context_new(pa_threaded_mainloop *pa, const char *name, pa_context_flags_t flags)
 {
     pa_mainloop_api *api = pa_threaded_mainloop_get_api(pa);
-    pa_context *ctx = pa_context_new(api, "default");
-    int err;
+    pa_context *ctx = pa_context_new(api, name);
+    int err = PA_OK;
 
     pa_context_set_state_callback(ctx,
             (pa_context_notify_cb_t)context_on_state_change, pa);
 
     {
         pa_threaded_mainloop_lock(pa);
-        err = pa_context_connect(ctx, NULL, 0, NULL);
+        err = pa_context_connect(ctx, NULL, flags, NULL);
         pa_threaded_mainloop_unlock(pa);
         if (err < 0)
             return NULL;
     }
 
-    context_poll_unless(pa, ctx, PA_CONTEXT_READY);
+    if (context_poll_unless(pa, ctx, PA_CONTEXT_READY) != PA_CONTEXT_READY) {
+        pa_context_unref(ctx);
+        return NULL;
+    }
     return ctx;
 }
 
-pa_stream *stream_new(pa_threaded_mainloop *pa, pa_context *ctx, pa_sample_format_t format, int rate, int channels)
+pa_stream *stream_new(pa_threaded_mainloop *pa, pa_context *ctx, const char *name, pa_sample_format_t format, int rate, int channels)
 {
     pa_stream *st = NULL;
     {
@@ -79,7 +159,7 @@ pa_stream *stream_new(pa_threaded_mainloop *pa, pa_context *ctx, pa_sample_forma
             ss.format = format;
             ss.rate = rate;
             ss.channels = channels;
-            st = pa_stream_new(ctx, "default", &ss, NULL);
+            st = pa_stream_new(ctx, name, &ss, NULL);
             if (!st) {
                 pa_threaded_mainloop_unlock(pa);
                 return NULL;
@@ -91,7 +171,13 @@ pa_stream *stream_new(pa_threaded_mainloop *pa, pa_context *ctx, pa_sample_forma
         pa_threaded_mainloop_unlock(pa);
     }
 
-    context_poll_unless(pa, ctx, PA_CONTEXT_READY);
+{
+    int s = context_poll_unless(pa, ctx, PA_CONTEXT_READY);
+    if (s != PA_CONTEXT_READY) {
+        pa_stream_unref(st);
+        return NULL;
+    }
+}
     return st;
 }
 
@@ -126,11 +212,13 @@ const (
     STREAM_TERMINATED = C.PA_STREAM_TERMINATED
 )
 
+/*
 const (
     OPERATION_RUNNING = C.PA_OPERATION_RUNNING;
     OPERATION_DONE = C.PA_OPERATION_DONE;
     OPERATION_CANCELLED = C.PA_OPERATION_CANCELLED
 )
+*/
 
 const (
     CONTEXT_NOFLAGS = C.PA_CONTEXT_NOFLAGS;
@@ -138,12 +226,14 @@ const (
     CONTEXT_NOFAIL = C.PA_CONTEXT_NOFAIL
 )
 
+/*
 const (
     STREAM_NODIRECTION = C.PA_STREAM_NODIRECTION;
     STREAM_PLAYBACK = C.PA_STREAM_PLAYBACK;
     STREAM_RECORD = C.PA_STREAM_RECORD;
     STREAM_UPLOAD = C.PA_STREAM_UPLOAD
 )
+*/
 
 const (
     STREAM_NOFLAGS = C.PA_STREAM_NOFLAGS;
@@ -198,6 +288,7 @@ const (
     ERR_MAX = C.PA_ERR_MAX
 )
 
+/*
 const (
     SUBSCRIPTION_MASK_NULL = C.PA_SUBSCRIPTION_MASK_NULL;
     SUBSCRIPTION_MASK_SINK = C.PA_SUBSCRIPTION_MASK_SINK;
@@ -230,6 +321,7 @@ const (
     SUBSCRIPTION_EVENT_REMOVE = C.PA_SUBSCRIPTION_EVENT_REMOVE;
     SUBSCRIPTION_EVENT_TYPE_MASK = C.PA_SUBSCRIPTION_EVENT_TYPE_MASK
 )
+*/
 
 const (
     SEEK_RELATIVE = C.PA_SEEK_RELATIVE;
@@ -238,6 +330,7 @@ const (
     SEEK_RELATIVE_END = C.PA_SEEK_RELATIVE_END
 )
 
+/*
 const (
     SINK_NOFLAGS = C.PA_SINK_NOFLAGS;
     SINK_HW_VOLUME_CTRL = C.PA_SINK_HW_VOLUME_CTRL;
@@ -249,7 +342,6 @@ const (
     SINK_FLAT_VOLUME = C.PA_SINK_FLAT_VOLUME;
     SINK_DYNAMIC_LATENCY = C.PA_SINK_DYNAMIC_LATENCY
 )
-
 const (
     SINK_INVALID_STATE = C.PA_SINK_INVALID_STATE;
     SINK_RUNNING = C.PA_SINK_RUNNING;
@@ -278,6 +370,7 @@ const (
     SOURCE_INIT = C.PA_SOURCE_INIT;
     SOURCE_UNLINKED = C.PA_SOURCE_UNLINKED
 )
+*/
 
 const (
     SAMPLE_U8 = C.PA_SAMPLE_U8;
@@ -318,7 +411,9 @@ type PulseSampleSpec struct {
 }
 
 func (self *PulseStream) Disconnect() {
-    C.pa_stream_disconnect(self.st)
+    C.pa_threaded_mainloop_lock(self.Context.MainLoop.pa);
+    C.pa_stream_disconnect(self.st);
+    C.pa_threaded_mainloop_unlock(self.Context.MainLoop.pa)
 }
 
 func (self *PulseStream) Dispose() {
@@ -330,7 +425,9 @@ func (self *PulseStream) ConnectToSink() int {
     C.pa_threaded_mainloop_lock(self.Context.MainLoop.pa);
     err := C.pa_stream_connect_playback(self.st, nil, nil, 0, nil, nil);
     C.pa_threaded_mainloop_unlock(self.Context.MainLoop.pa);
-    C.stream_poll_unless(self.Context.MainLoop.pa, self.st, PA_STREAM_READY);
+    if err == OK {
+        err = C.stream_poll_unless(self.Context.MainLoop.pa, self.st, PA_STREAM_READY)
+    }
     return int(err)
 }
 
@@ -373,7 +470,9 @@ func (self *PulseStream) Write(data interface{}, flags int) int {
 }
 
 func (self *PulseContext) Disconnect() {
-    C.pa_context_disconnect(self.ctx)
+    C.pa_threaded_mainloop_lock(self.MainLoop.pa);
+    C.pa_context_disconnect(self.ctx);
+    C.pa_threaded_mainloop_unlock(self.MainLoop.pa)
 }
 
 func (self *PulseContext) Dispose() {
@@ -381,16 +480,48 @@ func (self *PulseContext) Dispose() {
     C.pa_context_unref(self.ctx)
 }
 
-func (self *PulseContext) NewStream(spec *PulseSampleSpec) *PulseStream {
-    st := C.stream_new(self.MainLoop.pa, self.ctx, C.pa_sample_format_t(spec.Format), C.int(spec.Rate), C.int(spec.Channels));
-    if st == nil { return nil; }
-    return &PulseStream { Context: self, st: st };
+func (self *PulseContext) Drain() int {
+    return int(C.context_drain(self.MainLoop.pa, self.ctx))
 }
 
-func (self *PulseMainLoop) NewContext() *PulseContext {
-    ctx := C.context_new(self.pa);
-    if ctx == nil { return nil; }
-    return &PulseContext { MainLoop: self, ctx: ctx }
+func (self *PulseContext) ExitDaemon() int {
+    return int(C.context_exit_daemon(self.MainLoop.pa, self.ctx))
+}
+
+func (self *PulseContext) SetDefaultSource(name string) int {
+    name_ := C.CString(name);
+    retval := int(C.context_set_default_source(self.MainLoop.pa, self.ctx, name_));
+    C.cfree(unsafe.Pointer(name_));
+    return retval
+}
+
+func (self *PulseContext) SetDefaultSink(name string) int {
+    name_ := C.CString(name);
+    retval := int(C.context_set_default_sink(self.MainLoop.pa, self.ctx, name_));
+    C.cfree(unsafe.Pointer(name_));
+    return retval
+}
+
+func (self *PulseContext) NewStream(name string, spec *PulseSampleSpec) *PulseStream {
+    name_ := C.CString(name);
+    st := C.stream_new(self.MainLoop.pa, self.ctx, name_, C.pa_sample_format_t(spec.Format), C.int(spec.Rate), C.int(spec.Channels));
+    var retval *PulseStream = nil;
+    if st != nil {
+        retval = &PulseStream { Context: self, st: st }
+    }
+    C.cfree(unsafe.Pointer(name_));
+    return retval
+}
+
+func (self *PulseMainLoop) NewContext(name string, flags int) *PulseContext {
+    name_ := C.CString(name);
+    ctx := C.context_new(self.pa, name_, C.pa_context_flags_t(flags));
+    var retval *PulseContext = nil;
+    if ctx != nil {
+        retval = &PulseContext { MainLoop: self, ctx: ctx }
+    }
+    C.cfree(unsafe.Pointer(name_));
+    return retval
 }
 
 func (self *PulseMainLoop) Start() int {

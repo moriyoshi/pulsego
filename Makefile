@@ -4,7 +4,7 @@ TARG=pulse
 CGOFILES=\
 	pulse.go
 CGO_LDFLAGS=-lpulse
-CLEANFILES+=test
+CLEANFILES+=hello
 
 include $(GOROOT)/src/Make.pkg
 

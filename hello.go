@@ -1,12 +1,26 @@
 package main
 
 import "pulse"
+import "fmt"
+
+func send(ch chan int, val int) {
+    ch <- val
+}
 
 func myMain(sync_ch chan int, pa *pulse.PulseMainLoop) {
-    ctx := pa.NewContext();
+    defer send(sync_ch, 0);
+    ctx := pa.NewContext("default", 0);
+    if ctx == nil {
+        fmt.Println("Failed to create a new context");
+        return
+    }
     defer ctx.Dispose();
-    st := ctx.NewStream(&pulse.PulseSampleSpec {
+    st := ctx.NewStream("default", &pulse.PulseSampleSpec {
         Format:pulse.SAMPLE_FLOAT32LE, Rate:22500, Channels: 1 });
+    if st == nil {
+        fmt.Println("Failed to create a new stream");
+        return
+    }
     defer st.Dispose();
     st.ConnectToSink();
     var samples [4096]float32;
@@ -26,7 +40,6 @@ func myMain(sync_ch chan int, pa *pulse.PulseMainLoop) {
         }
         st.Write(samples, pulse.SEEK_RELATIVE);
     }
-    sync_ch <- 1
 }
 
 func main() {
