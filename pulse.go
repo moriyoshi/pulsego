@@ -426,7 +426,7 @@ func (self *PulseStream) ConnectToSink() int {
     err := C.pa_stream_connect_playback(self.st, nil, nil, 0, nil, nil);
     C.pa_threaded_mainloop_unlock(self.Context.MainLoop.pa);
     if err == OK {
-        err = C.stream_poll_unless(self.Context.MainLoop.pa, self.st, PA_STREAM_READY)
+        err = C.stream_poll_unless(self.Context.MainLoop.pa, self.st, STREAM_READY)
     }
     return int(err)
 }
@@ -436,7 +436,7 @@ func (self *PulseStream) GetSampleSpec() PulseSampleSpec {
     return PulseSampleSpec {
         Format: int(spec.format),
         Rate: int(spec.rate),
-        Channels: int(spec.channels)
+        Channels: int(spec.channels),
     }
 }
 
@@ -447,20 +447,20 @@ func (self *PulseStream) Write(data interface{}, flags int) int {
     samples := reflect.NewValue(data).(reflect.ArrayOrSliceValue);
     nsamples := samples.Len();
     ptr := unsafe.Pointer(samples.Elem(0).Addr());
-	switch typ_.Elem().(type) {
-	case *reflect.Int32Type:
+	switch typ_.Elem().Kind() {
+	case reflect.Int32:
 		if format != SAMPLE_S32LE && format != SAMPLE_S24_32LE {
 			return ERR_INVALID
 		}
-	case *reflect.Float32Type:
+	case reflect.Float32:
 		if format != SAMPLE_FLOAT32LE {
 			return ERR_INVALID
 		}
-	case *reflect.Int16Type:
+	case reflect.Int16:
 		if format != SAMPLE_S16LE {
 			return ERR_INVALID
 		}
-	case *reflect.Uint8Type:
+	case reflect.Uint8:
 		if format != SAMPLE_U8 {
 			return ERR_INVALID
 		}
