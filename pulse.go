@@ -443,10 +443,10 @@ func (self *PulseStream) GetSampleSpec() PulseSampleSpec {
 func (self *PulseStream) Write(data interface{}, flags int) int {
 	typ := reflect.Typeof(data);
 	format := self.GetSampleSpec().Format;
-	typ_ := typ.(reflect.ArrayOrSliceType);
-    samples := reflect.NewValue(data).(reflect.ArrayOrSliceValue);
+    typ_ := typ.(reflect.ArrayOrSliceType)
+    samples := reflect.NewValue(data).(reflect.ArrayOrSliceValue)
     nsamples := samples.Len();
-    ptr := unsafe.Pointer(samples.Elem(0).Addr());
+    ptr := unsafe.Pointer(samples.Elem(0).UnsafeAddr());
 	switch typ_.Elem().Kind() {
 	case reflect.Int32:
 		if format != SAMPLE_S32LE && format != SAMPLE_S24_32LE {
