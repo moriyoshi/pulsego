@@ -1,6 +1,7 @@
-package pulse
+package pulsego
 
 /*
+#cgo LDFLAGS: -lpulse
 #include <stdio.h>
 #include <unistd.h>
 #include <pulse/error.h>
@@ -191,8 +192,10 @@ int stream_write(pa_threaded_mainloop *pa, pa_stream *p, const void *data, size_
 }
 */
 import "C"
-import "unsafe"
-import "reflect"
+import (
+    "unsafe"
+    "reflect"
+)
 
 const (
     CONTEXT_UNCONNECTED = C.PA_CONTEXT_UNCONNECTED;
@@ -441,13 +444,12 @@ func (self *PulseStream) GetSampleSpec() PulseSampleSpec {
 }
 
 func (self *PulseStream) Write(data interface{}, flags int) int {
-	typ := reflect.Typeof(data);
+	typ := reflect.TypeOf(data);
 	format := self.GetSampleSpec().Format;
-    typ_ := typ.(reflect.ArrayOrSliceType)
-    samples := reflect.NewValue(data).(reflect.ArrayOrSliceValue)
+    samples := reflect.ValueOf(data)
     nsamples := samples.Len();
-    ptr := unsafe.Pointer(samples.Elem(0).UnsafeAddr());
-	switch typ_.Elem().Kind() {
+    ptr := unsafe.Pointer(samples.Index(0).UnsafeAddr());
+	switch typ.Elem().Kind() {
 	case reflect.Int32:
 		if format != SAMPLE_S32LE && format != SAMPLE_S24_32LE {
 			return ERR_INVALID
@@ -465,7 +467,7 @@ func (self *PulseStream) Write(data interface{}, flags int) int {
 			return ERR_INVALID
 		}
 	}
-	retval := int(C.stream_write(self.Context.MainLoop.pa, self.st, ptr, C.size_t(typ_.Elem().Size() * uintptr(nsamples)), C.pa_seek_mode_t(flags)));
+	retval := int(C.stream_write(self.Context.MainLoop.pa, self.st, ptr, C.size_t(typ.Elem().Size() * uintptr(nsamples)), C.pa_seek_mode_t(flags)));
     return retval
 }
 
